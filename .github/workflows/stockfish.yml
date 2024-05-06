@@ -1,333 +1,104 @@
 name: Stockfish
 on:
   push:
+    tags:
+      - "*"
     branches:
       - master
       - tools
       - github_ci
-      - github_ci_armv7
   pull_request:
     branches:
       - master
       - tools
 jobs:
-  Stockfish:
-    name: ${{ matrix.config.name }}
-    runs-on: ${{ matrix.config.os }}
-    env:
-      COMPILER: ${{ matrix.config.compiler }}
-      COMP: ${{ matrix.config.comp }}
-      CXXFLAGS: "-Werror"
-    strategy:
-      matrix:
-        config:
-          # set the variable for the required tests:
-          # run_expensive_tests: true
-          # run_32bit_tests: true
-          # run_64bit_tests: true
-          # run_armv8_tests: true
-          # run_armv7_tests: true
-          - {
-              name: "Ubuntu 20.04 GCC",
-              os: ubuntu-20.04,
-              compiler: g++,
-              comp: gcc,
-              run_expensive_tests: true,
-              run_32bit_tests: true,
-              run_64bit_tests: true,
-              shell: 'bash {0}'
-            }
-          - {
-              name: "Ubuntu 20.04 Clang",
-              os: ubuntu-20.04,
-              compiler: clang++,
-              comp: clang,
-              run_32bit_tests: true,
-              run_64bit_tests: true,
-              shell: 'bash {0}'
-            }
-          - {
-              name: "Ubuntu 20.04 NDK armv8",
-              os: ubuntu-20.04,
-              compiler: aarch64-linux-android21-clang++,
-              comp: ndk,
-              run_armv8_tests: true,
-              shell: 'bash {0}'
-            }
-          - {
-              name: "Ubuntu 20.04 NDK armv7",
-              os: ubuntu-20.04,
-              compiler: armv7a-linux-androideabi21-clang++,
-              comp: ndk,
-              run_armv7_tests: true,
-              shell: 'bash {0}'
-            }
-          - {
-              name: "MacOS 10.15 Apple Clang",
-              os: macos-10.15,
-              compiler: clang++,
-              comp: clang,
-              run_64bit_tests: true,
-              shell: 'bash {0}'
-            }
-          - {
-              name: "MacOS 10.15 GCC 10",
-              os: macos-10.15,
-              compiler: g++-10,
-              comp: gcc,
-              run_64bit_tests: true,
-              shell: 'bash {0}'
-            }
-          - {
-              name: "Windows 2022 Mingw-w64 GCC x86_64",
-              os: windows-2022,
-              compiler: g++,
-              comp: gcc,
-              run_64bit_tests: true,
-              msys_sys: 'mingw64',
-              msys_env: 'x86_64',
-              shell: 'msys2 {0}'
-            }
-          - {
-              name: "Windows 2022 Mingw-w64 GCC i686",
-              os: windows-2022,
-              compiler: g++,
-              comp: gcc,
-              run_32bit_tests: true,
-              msys_sys: 'mingw32',
-              msys_env: 'i686',
-              shell: 'msys2 {0}'
-            }
-          - {
-              name: "Windows 2022 Mingw-w64 Clang x86_64",
-              os: windows-2022,
-              compiler: clang++,
-              comp: clang,
-              run_64bit_tests: true,
-              msys_sys: 'clang64',
-              msys_env: 'clang-x86_64',
-              shell: 'msys2 {0}'
-            }
-
-    defaults:
-      run:
-        working-directory: src
-        shell: ${{ matrix.config.shell }}
+  Prerelease:
+    if: github.repository == 'official-stockfish/Stockfish' && (github.ref == 'refs/heads/master' || (startsWith(github.ref_name, 'sf_') && github.ref_type == 'tag'))
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
+
+      # returns null if no pre-release exists
+      - name: Get Commit SHA of Latest Pre-release
+        run: |
+          # Install required packages
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+
+          echo "COMMIT_SHA_TAG=$(jq -r 'map(select(.prerelease)) | first | .tag_name' <<< $(curl -s https://api.github.com/repos/${{ github.repository_owner }}/Stockfish/releases))" >> $GITHUB_ENV
+
+      # delete old previous pre-release and tag
+      - run: gh release delete ${{ env.COMMIT_SHA_TAG }} --cleanup-tag
+        if: env.COMMIT_SHA_TAG != 'null'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Make sure that an old ci that still runs on master doesn't recreate a prerelease
+      - name: Check Pullable Commits
+        id: check_commits
+        run: |
+          git fetch
+          CHANGES=$(git rev-list HEAD..origin/master --count)
+          echo "CHANGES=$CHANGES" >> $GITHUB_ENV
+
+      - name: Get last commit SHA
+        id: last_commit
+        run: echo "COMMIT_SHA=$(git rev-parse HEAD | cut -c 1-8)" >> $GITHUB_ENV
+
+      - name: Get commit date
+        id: commit_date
+        run: echo "COMMIT_DATE=$(git show -s --date=format:'%Y%m%d' --format=%cd HEAD)" >> $GITHUB_ENV
+
+      # Create a new pre-release, the other upload_binaries.yml will upload the binaries
+      # to this pre-release.
+      - name: Create Prerelease
+        if: github.ref_name == 'master' && env.CHANGES == '0'
+        uses: softprops/action-gh-release@4634c16e79c963813287e889244c50009e7f0981
         with:
-          fetch-depth: 0
+          name: Stockfish dev-${{ env.COMMIT_DATE }}-${{ env.COMMIT_SHA }}
+          tag_name: stockfish-dev-${{ env.COMMIT_DATE }}-${{ env.COMMIT_SHA }}
+          prerelease: true
 
-      - name: Download required linux packages
-        if: runner.os == 'Linux'
+  Matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      arm_matrix: ${{ steps.set-arm-matrix.outputs.arm_matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: set-matrix
         run: |
-          sudo apt update
-          sudo apt install expect valgrind g++-multilib qemu-user
-
-      - name: Setup msys and install required packages
-        if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: ${{matrix.config.msys_sys}}
-          install: mingw-w64-${{matrix.config.msys_env}}-${{matrix.config.comp}} make git expect
-
-      - name: Download the used network from the fishtest framework
+          TASKS=$(echo $(cat .github/ci/matrix.json) )
+          echo "MATRIX=$TASKS" >> $GITHUB_OUTPUT
+      - id: set-arm-matrix
         run: |
-          make net
-
-      - name: Extract the bench number from the commit history
-        run: |
-          git log HEAD | grep "\b[Bb]ench[ :]\+[0-9]\{7\}" | head -n 1 | sed "s/[^0-9]*\([0-9]*\).*/\1/g" > git_sig
-          [ -s git_sig ] && echo "benchref=$(cat git_sig)" >> $GITHUB_ENV && echo "Reference bench:" $(cat git_sig) || echo "No bench found"
-
-      - name: Check compiler
-        run: |
-          export PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
-          $COMPILER -v
-
-      - name: Test help target
-        run: |
-          make help
-
-      # x86-32 tests
-
-      - name: Test debug x86-32 build
-        if: ${{ matrix.config.run_32bit_tests }}
-        run: |
-          export CXXFLAGS="-Werror -D_GLIBCXX_DEBUG"
-          make clean
-          make -j2 ARCH=x86-32 optimize=no debug=yes build
-          ../tests/signature.sh $benchref
-
-      - name: Test x86-32 build
-        if: ${{ matrix.config.run_32bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-32 build
-          ../tests/signature.sh $benchref
-
-      - name: Test x86-32-sse41-popcnt build
-        if: ${{ matrix.config.run_32bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-32-sse41-popcnt build
-          ../tests/signature.sh $benchref
-
-      - name: Test x86-32-sse2 build
-        if: ${{ matrix.config.run_32bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-32-sse2 build
-          ../tests/signature.sh $benchref
-
-      - name: Test general-32 build
-        if: ${{ matrix.config.run_32bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=general-32 build
-          ../tests/signature.sh $benchref
-
-      # x86-64 tests
-
-      - name: Test debug x86-64-modern build
-        if: ${{ matrix.config.run_64bit_tests }}
-        run: |
-          export CXXFLAGS="-Werror -D_GLIBCXX_DEBUG"
-          make clean
-          make -j2 ARCH=x86-64-modern optimize=no debug=yes build
-          ../tests/signature.sh $benchref
-
-      - name: Test x86-64-modern build
-        if: ${{ matrix.config.run_64bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-64-modern build
-          ../tests/signature.sh $benchref
-
-      - name: Test x86-64-ssse3 build
-        if: ${{ matrix.config.run_64bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-64-ssse3 build
-          ../tests/signature.sh $benchref
-
-      - name: Test x86-64-sse3-popcnt build
-        if: ${{ matrix.config.run_64bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-64-sse3-popcnt build
-          ../tests/signature.sh $benchref
-
-      - name: Test x86-64 build
-        if: ${{ matrix.config.run_64bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-64 build
-          ../tests/signature.sh $benchref
-
-      - name: Test general-64 build
-        if: matrix.config.run_64bit_tests
-        run: |
-          make clean
-          make -j2 ARCH=general-64 build
-          ../tests/signature.sh $benchref
-
-      # x86-64 with newer extensions tests
-
-      - name: Compile x86-64-avx2 build
-        if: ${{ matrix.config.run_64bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-64-avx2 build
-
-      - name: Compile x86-64-bmi2 build
-        if: ${{ matrix.config.run_64bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-64-bmi2 build
-
-      - name: Compile x86-64-avx512 build
-        if: ${{ matrix.config.run_64bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-64-avx512 build
-
-      - name: Compile x86-64-vnni512 build
-        if: ${{ matrix.config.run_64bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-64-vnni512 build
-
-      - name: Compile x86-64-vnni256 build
-        if: ${{ matrix.config.run_64bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-64-vnni256 build
-
-      # armv8 tests
-
-      - name: Test armv8 build
-        if: ${{ matrix.config.run_armv8_tests }}
-        run: |
-          export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-          export LDFLAGS="-static -Wno-unused-command-line-argument"
-          make clean
-          make -j2 ARCH=armv8 build
-          ../tests/signature.sh $benchref
-
-      # armv7 tests
-
-      - name: Test armv7 build
-        if: ${{ matrix.config.run_armv7_tests }}
-        run: |
-          export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-          export LDFLAGS="-static -Wno-unused-command-line-argument"
-          make clean
-          make -j2 ARCH=armv7 build
-          ../tests/signature.sh $benchref
-
-      - name: Test armv7-neon build
-        if: ${{ matrix.config.run_armv7_tests }}
-        run: |
-          export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-          export LDFLAGS="-static -Wno-unused-command-line-argument"
-          make clean
-          make -j2 ARCH=armv7-neon build
-          ../tests/signature.sh $benchref
-
-      # Other tests
-
-      - name: Check perft and search reproducibility
-        if: ${{ matrix.config.run_64bit_tests }}
-        run: |
-          make clean
-          make -j2 ARCH=x86-64-modern build
-          ../tests/perft.sh
-          ../tests/reprosearch.sh
-
-      # Sanitizers
-
-      - name: Run under valgrind
-        if: ${{ matrix.config.run_expensive_tests }}
-        run: |
-          export CXXFLAGS="-O1 -fno-inline"
-          make clean
-          make -j2 ARCH=x86-64-modern debug=yes optimize=no build > /dev/null
-          ../tests/instrumented.sh --valgrind
-          ../tests/instrumented.sh --valgrind-thread
-
-      - name: Run with UB sanitizer
-        if: ${{ matrix.config.run_expensive_tests }}
-        run: |
-          export CXXFLAGS="-O1 -fno-inline"
-          make clean
-          make -j2 ARCH=x86-64-modern sanitize=undefined optimize=no debug=yes build > /dev/null
-          ../tests/instrumented.sh --sanitizer-undefined
-
-      - name: Run with thread sanitizer
-        if: ${{ matrix.config.run_expensive_tests }}
-        run: |
-          export CXXFLAGS="-O1 -fno-inline"
-          make clean
-          make -j2 ARCH=x86-64-modern sanitize=thread optimize=no debug=yes build > /dev/null
-          ../tests/instrumented.sh --sanitizer-thread
+          TASKS_ARM=$(echo $(cat .github/ci/arm_matrix.json) )
+          echo "ARM_MATRIX=$TASKS_ARM" >> $GITHUB_OUTPUT
+  Compilation:
+    needs: [Matrix]
+    uses: ./.github/workflows/compilation.yml
+    with:
+      matrix: ${{ needs.Matrix.outputs.matrix }}
+  ARMCompilation:
+    needs: [Matrix]
+    uses: ./.github/workflows/arm_compilation.yml
+    with:
+      matrix: ${{ needs.Matrix.outputs.arm_matrix }}
+  IWYU:
+    uses: ./.github/workflows/iwyu.yml
+  Sanitizers:
+    uses: ./.github/workflows/sanitizers.yml
+  Tests:
+    uses: ./.github/workflows/tests.yml
+  Binaries:
+    if: github.repository == 'official-stockfish/Stockfish'
+    needs: [Matrix, Prerelease, Compilation]
+    uses: ./.github/workflows/upload_binaries.yml
+    with:
+      matrix: ${{ needs.Matrix.outputs.matrix }}
+  ARM_Binaries:
+    if: github.repository == 'official-stockfish/Stockfish'
+    needs: [Matrix, Prerelease, ARMCompilation]
+    uses: ./.github/workflows/upload_binaries.yml
+    with:
+      matrix: ${{ needs.Matrix.outputs.arm_matrix }}
