@@ -106,6 +106,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download required linux packages
         if: runner.os == 'Linux'
@@ -138,16 +139,16 @@ jobs:
       - name: Build Docker container
         if: matrix.config.base_image
         run: |
-          docker buildx build --load -t sf_builder - << EOF
+          docker buildx build --platform ${{ matrix.config.platform }} --load -t sf_builder - << EOF
           FROM ${{ matrix.config.base_image }}
           WORKDIR /app
           RUN apk update && apk add make g++
-          CMD ["sh", "script.sh"]
+          CMD ["sh", "src/script.sh"]
           EOF
 
       - name: Download required macOS packages
         if: runner.os == 'macOS'
-        run: brew install coreutils
+        run: brew install coreutils gcc@11
 
       - name: Setup msys and install required packages
         if: runner.os == 'Windows'
@@ -175,7 +176,7 @@ jobs:
             $COMPCXX -v
           else
             echo "$COMPCXX -v" > script.sh
-            docker run --rm --platform ${{ matrix.config.platform }} -v ${{ github.workspace }}/src:/app sf_builder
+            docker run --rm --platform ${{ matrix.config.platform }} -v ${{ github.workspace }}:/app sf_builder
           fi
 
       - name: Test help target
@@ -341,8 +342,8 @@ jobs:
       - name: Test riscv64 build
         if: matrix.config.run_riscv64_tests
         run: |
-          echo "export LDFLAGS='-static' && make clean && make -j4 ARCH=riscv64 build" > script.sh
-          docker run --rm --platform ${{ matrix.config.platform }} -v ${{ github.workspace }}/src:/app sf_builder
+          echo "cd src && export LDFLAGS='-static' && make clean && make -j4 ARCH=riscv64 build" > script.sh
+          docker run --rm --platform ${{ matrix.config.platform }} -v ${{ github.workspace }}:/app sf_builder
           ../tests/signature.sh $benchref
 
       # ppc64 tests
@@ -350,8 +351,8 @@ jobs:
       - name: Test ppc64 build
         if: matrix.config.run_ppc64_tests
         run: |
-          echo "export LDFLAGS='-static' && make clean && make -j4 ARCH=ppc-64 build" > script.sh
-          docker run --rm --platform ${{ matrix.config.platform }} -v ${{ github.workspace }}/src:/app sf_builder
+          echo "cd src && export LDFLAGS='-static' && make clean && make -j4 ARCH=ppc-64 build" > script.sh
+          docker run --rm --platform ${{ matrix.config.platform }} -v ${{ github.workspace }}:/app sf_builder
           ../tests/signature.sh $benchref
 
       # Other tests
